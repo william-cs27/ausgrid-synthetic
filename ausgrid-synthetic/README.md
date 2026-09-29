@@ -1,104 +1,78 @@
 # Ausgrid paired daily synthetic profiles
 
-This reproducible project generates paired **total recorded consumption**
-(`GC + CL` when the household has a CL record) and **gross solar generation**
-(`GG`) as 48 half-hour kWh readings per day. The primary question is whether a
-conservative solar-night constraint improves plausibility without sacrificing
-fidelity, utility, or measured household disclosure risk.
+This project generates independent paired daily profiles of **recorded total consumption** (`GC + CL` where a household has controlled-load records) and **gross solar generation** (`GG`). Each channel has 48 half-hour kWh intervals. The current generator is conditional diffusion v2 with a conservative solar-night mask (`diffusion_v2_post`). A training-only daily load-total calibration is available as an exploratory postprocessing arm. Earlier statistical and VAE experiments remain for comparison; the original diffusion run failed a load-peak plausibility check.
 
-## Colab quick start
+## Repository layout
 
-1. Unzip the project archive into Google Drive so it becomes
-   `MyDrive/ausgrid-synthetic/` with `src/` and `notebooks/` inside.
-2. In `MyDrive/ausgrid-synthetic/data/raw/`, place the **three unchanged CSVs**:
-   `Solar home 2010-2011.csv`, `Solar home 2011-2012.csv`, and
-   `Solar home 2012-2013.csv`. Keep the original first descriptive row.
-3. Open `notebooks/Ausgrid_Colab.ipynb` in Google Colab, choose a GPU runtime,
-   and run the cells in order. Mount Drive when prompted. If Colab disconnects,
-   rerun the notebook: it skips completed stages and resumes training from
-   an epoch checkpoint. Set `PROJECT_ROOT` in its first code cell if needed.
+The project files are in the inner `ausgrid-synthetic/` directory of this repository. Run commands from that directory (the one containing `src/`, `requirements.txt`, and this README).
 
-No raw CSVs are included in this archive. Prepared data, trained model states,
-synthetic samples, and JSON reports are written under this project folder in
-Drive. A full run can use several GB; check available Drive space. Generate
-the short two-epoch pilot first, then decide whether to proceed with all six
-neural runs. No external API key or experiment tracker is required.
+| Path | Purpose |
+| --- | --- |
+| `src/ausgrid_synth/data.py` | Raw CSV preparation, exclusions, household split, conditions, solar-night mask |
+| `src/ausgrid_synth/diffusion.py` | Diffusion v2 model, checkpointed training, DDIM sampling, validation peak gate |
+| `src/ausgrid_synth/calibration.py` | Optional training-only daily load-total mapping |
+| `src/ausgrid_synth/cli.py` | Preparation, training, validation, sampling, calibration, evaluation |
+| `src/ausgrid_synth/evaluate.py` | Shared fidelity, utility, and bounded disclosure probe |
+| `notebooks/Ausgrid_Diffusion_Colab.ipynb` | Current training, sampling, evaluation, and profile review |
+| `notebooks/Ausgrid_Diffusion_Load_Calibration.ipynb` | Optional follow-up mapping and paired comparison |
+| `notebooks/Ausgrid_Colab.ipynb`, `Ausgrid_Jupyter.ipynb` | Historical statistical and VAE workflows |
+| `notebooks/Ausgrid_Monthly_*.ipynb` | Separate monthly-data research track; not inputs to the daily diffusion model |
+| `outputs/reports/` | Recorded experiment reports; checkpoints and samples are local runtime artifacts |
 
-## Folder layout
+## Reproduce the daily experiment
 
-```
-ausgrid-synthetic/
-  data/raw/                # original CSVs supplied by you
-  data/prepared/           # paired arrays, household split, audit
-  outputs/checkpoints/     # best and latest epoch checkpoints
-  outputs/samples/         # generated day profiles by arm/context/seed
-  outputs/reports/         # locked test reports
-  notebooks/Ausgrid_Colab.ipynb
-  src/ausgrid_synth/       # preprocessing, models, evaluation, CLI
-  requirements.txt
-```
-
-## Data and evaluation protocol
-
-- A household with **no CL records anywhere** contributes GC as its recorded
-  consumption. A household that **ever has CL records** contributes `GC + CL`
-  only on days with GC, GG and CL all present. Missing CL on such households
-  never becomes zero. This fixed rule avoids changing the target definition
-  when a CL row vanishes. Verify the implied selection in `audit.json`.
-- Preserve the original interval order. `0:30` is the 00:00–00:30 interval;
-  final `0:00` is 23:30–24:00 on the labelled date. Exclude the two local
-  clock-change dates per year because the raw files contain 48 labelled slots
-  even on daylight-saving transitions. Do not interpolate those dates.
-- Exclude any paired day where GC, GG, or (if applicable) CL has an estimated
-  `Row Quality` flag, a missing value, or a negative interval. The first file
-  lacks the quality column. Confirm actual exclusions in the audit.
-- The split is 180/60/60 **households** for train/validation/test, stratified
-  approximately by solar capacity using five groups. Every day of each
-  household remains in only one split. All scaling and regression fits use
-  train households only.
-- Inputs are cyclic day-of-year, weekend indicator, and log recorded panel
-  capacity, standardized using the training split. Household ID, postcode,
-  weather, and test consumption are not generation inputs.
-- The default mask marks interval midpoints whose approximate solar elevation
-  at Sydney is below −9°. This is a deliberately conservative *night* rule,
-  not a precise roof-level PV model. The supplied data contain small positive
-  nighttime GG values (at most about 0.013 kWh in the initial audit), so
-  report both measured nighttime energy and the count above **0.02 kWh**.
-  Never impose a strict kWh cap directly from the kWp rating.
-- `statistical`: joint PCA–Ridge residual Gaussian baseline, season/calendar
-  and capacity conditioned; `vae`: conditional VAE; `vae_post`: the same VAE
-  samples with night masking applied after generation; `vae_daylight`: the same
-  VAE architecture trained with the night mask. For each neural arm use three
-  seeds with a shared train/validation/test split. The postprocessed arm has
-  **no new training run**.
-- Use matched held-out contexts for fidelity; use the same 30,000 train
-  contexts for real-trained versus synthetic-trained morning-to-afternoon
-  Ridge prediction, tested on real held-out households. A bounded nearest
-  synthetic-profile attack reports household membership AUC. It is one
-  empirical risk probe, **not proof of privacy**. Only independently sampled
-  days are generated; no continuity across weeks or persistent synthetic
-  household identities are claimed.
-
-## CLI (optional outside the notebook)
-
-Run from the project root with `PYTHONPATH=src`. In order:
+Install `requirements.txt` in a Python environment with PyTorch. A CUDA GPU is recommended for training and full sampling. Place the three original `Solar home 2010-2011.csv`, `2011-2012.csv`, and `2012-2013.csv` files in `data/raw/` (retain the descriptive first row). The current repository contains copies, but confirm their provenance and license before redistributing data. Work from the inner project directory:
 
 ```bash
+python -m pip install -r requirements.txt
+export PYTHONPATH=src
 python -m ausgrid_synth.cli prepare
-python -m ausgrid_synth.cli baseline
-python -m ausgrid_synth.cli train --arm vae --seed 1 --epochs 30
-python -m ausgrid_synth.cli train --arm vae_daylight --seed 1 --epochs 30
-for context in train test privacy; do
-  python -m ausgrid_synth.cli sample --arm vae --seed 1 --context "$context"
-  python -m ausgrid_synth.cli sample --arm vae_post --seed 1 --context "$context"
-  python -m ausgrid_synth.cli sample --arm vae_daylight --seed 1 --context "$context"
-done
-python -m ausgrid_synth.cli evaluate --arm vae_daylight --seed 1
+python -m ausgrid_synth.cli train --arm diffusion_v2 --seed 1 --epochs 2
+python -m ausgrid_synth.cli train --arm diffusion_v2 --seed 1 --epochs 25
+python -m ausgrid_synth.cli validate --arm diffusion_v2 --seed 1
 ```
 
-Repeat seeds 2–3 through the notebook. The statistical baseline uses seed 1.
-`*_latest.pt` captures the optimizer and random generator state at each epoch;
-`*_seedN.pt` retains the best validation model. Use validation for adjustments;
-inspect the final test only after decisions are frozen. A future manuscript
-should report the attack's limited power, the single geographical and
-historical dataset, and selection of customers based on first-year data quality.
+The two-epoch pilot resumes into the fixed 25-epoch run. After the validation peak gate passes, repeat `train --arm diffusion_v2 --epochs 25` for seeds 2 and 3, then run:
+
+```bash
+for seed in 1 2 3; do
+  for context in train test privacy; do
+    python -m ausgrid_synth.cli sample --arm diffusion_v2_post --seed "$seed" --context "$context"
+  done
+  python -m ausgrid_synth.cli evaluate --arm diffusion_v2_post --seed "$seed"
+done
+```
+
+`diffusion_v2_post` uses the **same** model and generated profiles as `diffusion_v2`, setting GG to zero only for the conservative night mask. The sample command saves the raw diffusion sample before deriving the masked one. Reruns verify the existing sample's context indices. Checkpoints resume only when the fixed configuration and prepared-data SHA-256 match. The `validate` stage gates the validation-household peak q95 at no more than 3× its real counterpart. This gate catches the original runaway failure; it does not establish model quality.
+
+For optional training-only load calibration, generate all three masked contexts for each seed first:
+
+```bash
+for seed in 1 2 3; do
+  python -m ausgrid_synth.cli calibrate --arm diffusion_v2_loadcal_post --seed "$seed"
+  python -m ausgrid_synth.cli evaluate --arm diffusion_v2_loadcal_post --seed "$seed"
+done
+```
+
+Or open `notebooks/Ausgrid_Diffusion_Colab.ipynb`, followed by `notebooks/Ausgrid_Diffusion_Load_Calibration.ipynb`. They locate the project from a local notebook folder or the documented Google Drive location, use the same CLI, and show the recorded comparison. If using Colab, mount Drive from the setup cell when prompted. The prepared `.npz`, sample `.npz`, and `.pt` checkpoint files are not tracked; create them locally from the raw CSVs and training run. Reports alone cannot regenerate samples. Do not load checkpoints from untrusted sources.
+
+## Data and evaluation contract
+
+- Households without any CL records contribute GC. Households with CL records contribute `GC + CL` only on days with GC, GG, and CL present. Missing CL is never set to zero for those households. Estimated-quality, missing, negative, and daylight-saving transition days are excluded. Inspect `data/prepared/audit.json` after preparation.
+- Original interval order runs from `0:30` (00:00–00:30) through final `0:00` (23:30–24:00). The fixed split is 180/60/60 train/validation/test **households**, approximately stratified by panel capacity. Scaling and model fitting use train households. Calendar and log panel capacity supply four conditions; household ID, weather, postcode, and real test load are not generator inputs.
+- The model jointly generates 96 values, using train-channel `log1p` transforms, velocity prediction with a zero-terminal-signal cosine schedule, and 50 deterministic DDIM steps. Nonnegative energy is enforced at inverse transform; extreme or nonfinite output aborts instead of being silently upper-clipped. The night mask uses approximate Sydney solar elevation below −9°, not an exact roof-level PV calculation or a kWp energy cap.
+- Matched train, test, and privacy context indices are fixed across arms. The shared evaluator reports load and solar daily/peak Wasserstein distances, profile errors, nighttime GG, a real-test morning-to-afternoon Ridge MAE trained on 30,000 matched synthetic versus real train days, and a bounded nearest-profile household membership AUC. Its AUC is **not** a privacy guarantee. Generated sample archives contain `idx` linked to internal household data and should not be released as anonymized output. These are independent daily samples without longitudinal household identities.
+
+## What the saved reports support
+
+Three seeds share one household split. Mean scores below are calculated from the tracked `outputs/reports/*_seed{1,2,3}.json` files; lower W1 and MAE is favorable. They describe the recorded run, not a new result from this refactor.
+
+| Arm | Load daily W1 (kWh) | Load peak W1 (kWh/interval) | Solar daily W1 (kWh) | Synthetic-to-real MAE (kWh/interval) | Membership AUC |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| VAE + night mask | 0.668 | 0.415 | 0.289 | 0.300 | 0.524 |
+| Diffusion v2 + night mask | 1.015 | 0.065 | 0.133 | 0.272 | 0.532 |
+| Diffusion v2 + load calibration + night mask | 0.747 | 0.065 | 0.133 | 0.273 | 0.531 |
+
+Diffusion v2 improves peak fidelity, solar daily fidelity, and downstream utility against the VAE in these reports. The VAE has a lower **load daily W1**. Calibration improves diffusion's load daily W1, with small changes to peak fidelity and utility; it was developed after viewing the same held-out test split. The original diffusion arm had implausible peaks (seed 1 generated load peak q95 ≈463 kWh per interval against ≈3.10 real) and is not the current model. Treat all method selection on this already-inspected test split as exploratory; confirm on untouched households before making a final claim.
+
+The monthly notebooks and outputs address a separate 2007–2014 monthly dataset. Their VAE results should not be combined with the daily 48-interval scores above.
